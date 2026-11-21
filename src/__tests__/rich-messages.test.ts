@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import bigInt from "big-integer";
 import { Api } from "telegram/tl/index.js";
 import { compileRichMarkdown } from "../rich-markdown.js";
+import type { UploadedFile } from "../media-transfer.js";
 import {
   getRichCapabilities,
   getRichMessage,
@@ -76,6 +77,45 @@ function writes(calls: Fields[]) {
 }
 
 describe("durable native rich writes", () => {
+  it("stages an image without a separate post, then sends one native Rich message with photo and table", async () => {
+    let composed: Fields | undefined;
+    const image: UploadedFile = {
+      kind: "uploaded-file",
+      inputFile: new Api.InputFile({ id: bigInt(101), parts: 1, name: "cat.jpg", md5Checksum: "0".repeat(32) }),
+      fileName: "cat.jpg", size: 1024, mimeType: "image/jpeg",
+    };
+    await fixture(async (context, calls) => {
+      const id = randomUUID();
+      const opts = { photo: { identity: "upload:cat-test", file: image, caption: "Царь на помойке" } };
+      const receipt = await writeRichMessage(context, "send", "42", id, markdown, opts);
+      assert.equal(receipt.state, "sent");
+      assert.equal(receipt.verified, true);
+      assert.equal(calls.filter((call) => call.className === "messages.UploadMedia").length, 1);
+      assert.equal(writes(calls).length, 1);
+      const sent = writes(calls)[0];
+      assert.equal(f(sent.richMessage).className, "InputRichMessage");
+      const blocks = f(sent.richMessage).blocks as Fields[];
+      assert.equal(blocks[0].className, "PageBlockPhoto");
+      assert.ok(blocks.some((block) => block.className === "PageBlockTable"));
+      assert.equal((f(sent.richMessage).photos as Fields[]).length, 1);
+      assert.equal((await readRichReceipt(context.journalDirectory, id))?.verified, true);
+      assert.deepEqual(await writeRichMessage(context, "send", "42", id, markdown, opts), receipt);
+      assert.equal(writes(calls).length, 1);
+    }, {
+      write: (request) => {
+        if (request.className === "messages.UploadMedia")
+          return { className: "MessageMediaPhoto", photo: {
+            className: "Photo", id: bigInt(777), accessHash: bigInt(888), fileReference: Buffer.from([1, 2]),
+          } };
+        if (request.className === "messages.SendMessage") composed = f(request.richMessage);
+        return { updates: [{ className: "UpdateMessageID", randomId: request.randomId, id: 123 }] };
+      },
+      read: (request) => ({ messages: [{
+        id: request.id, peerId: returnedPeer, richMessage: composed,
+      }] }),
+    });
+  });
+
   it("sends an actual native table with empty ordinary text and verifies exact readback", async () => {
     await fixture(async (context, calls) => {
       const requestId = randomUUID();

@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import bigInt from "big-integer";
 import { LAYER } from "telegram/tl/AllTLObjects.js";
 import { Api } from "telegram/tl/index.js";
-import { compileRichMarkdown, inspectRichMessage, RICH_LIMITS, type RichInspection } from "./rich-markdown.js";
+import { compileRichMarkdown, inspectRichMessage, RICH_LIMITS, type RichInspection, type RichNode } from "./rich-markdown.js";
+import type { UploadedFile } from "./media-transfer.js";
 
 type ObjectFields = Record<string, unknown>;
 type Constructor = new (args: ObjectFields) => Api.AnyRequest;
@@ -30,7 +31,17 @@ export interface RichContext {
   once<T>(fn: () => Promise<T>): Promise<T>;
 }
 
+export interface RichPhoto {
+  /** Bytes have been uploaded to the SAME Telegram account; this is NOT a published message. */
+  file: UploadedFile;
+  /** Stable source identifier from Cloud (uploadId or HTTPS URL), hashed in the receipt. */
+  identity: string;
+  caption?: string;
+  placement?: "before" | "after";
+}
+
 export interface RichOptions {
+  photo?: RichPhoto;
   silent?: boolean;
   protectContent?: boolean;
   clearDraft?: boolean;
@@ -75,6 +86,53 @@ export interface RichReceipt {
   createdAt: string;
   updatedAt: string;
   error?: string;
+}
+
+/** Layer-233 constructors are loaded by the pinned schema, ahead of GramJS declarations. */
+function richNode(name: string, args: ObjectFields): RichNode {
+  const Ctor = (Api as unknown as Record<string, new (args: ObjectFields) => RichNode>)[name];
+  if (!Ctor) throw new Error(`Telegram layer ${LAYER} lacks ${name}.`);
+  return new Ctor(args);
+}
+
+function photoDescriptor(photo: RichPhoto) {
+  if (!photo.identity || photo.identity.length > 2048) throw new Error("Rich photo identity is invalid.");
+  if (photo.file.kind !== "uploaded-file" || !photo.file.inputFile)
+    throw new Error("Rich photo requires a Telegram uploaded-file handle.");
+  if ((photo.caption?.length ?? 0) > 1024) throw new Error("Rich photo caption is too long.");
+  return { identity: photo.identity, caption: photo.caption ?? "", placement: photo.placement ?? "before" };
+}
+
+/** Register an uploaded photo without publishing anything, then insert its native Rich block. */
+async function addRichPhoto(context: RichContext, peer: Api.TypeInputPeer, compiled: ReturnType<typeof compileRichMarkdown>, photo: RichPhoto, flags: RichOptions) {
+  const uploaded = fields(await context.client.invoke(
+    new Api.messages.UploadMedia({
+      peer,
+      media: new Api.InputMediaUploadedPhoto({ file: photo.file.inputFile }),
+    }),
+  ));
+  const photoData = fields(uploaded.photo);
+  if (photoData.className !== "Photo" || !photoData.id || !photoData.accessHash || !photoData.fileReference)
+    throw new Error("RICH_PHOTO_STAGE_FAILED: Telegram returned no reusable Photo reference.");
+  const inputPhoto = richNode("InputPhoto", {
+    id: photoData.id,
+    accessHash: photoData.accessHash,
+    fileReference: photoData.fileReference,
+  });
+  const caption = richNode("PageCaption", {
+    text: photo.caption ? richNode("TextPlain", { text: photo.caption }) : richNode("TextEmpty", {}),
+    credit: richNode("TextEmpty", {}),
+  });
+  const block = richNode("PageBlockPhoto", { photoId: photoData.id, caption });
+  const blocks = photo.placement === "after"
+    ? [...compiled.blocks, block]
+    : [block, ...compiled.blocks];
+  compiled.input = richNode("InputRichMessage", {
+    blocks, photos: [inputPhoto], rtl: flags.rtl, noautolink: flags.noautolink,
+  });
+  compiled.inspection = inspectRichMessage(compiled.input);
+  if (compiled.inspection.truncated || compiled.inspection.unsupported.length || compiled.inspection.photoCount !== 1)
+    throw new Error("RICH_PHOTO_STAGE_FAILED: photo block did not pass local inspection.");
 }
 
 function fields(value: unknown): ObjectFields {
@@ -262,6 +320,7 @@ export function richSemanticStructure(value: unknown, diagnostics: string[] = []
     TextConcat: ["texts"],
     TextUrl: ["text", "url"],
     PageBlockDivider: [],
+    PageCaption: ["text", "credit"],
     PageBlockParagraph: ["text"],
     PageBlockPreformatted: ["text", "language"],
     PageBlockBlockquote: ["text", "caption", "collapsed"],
@@ -319,6 +378,10 @@ export function richSemanticStructure(value: unknown, diagnostics: string[] = []
       if (["TextAutoUrl", "TextAutoEmail", "TextAutoPhone", "TextBankCard"].includes(name)) {
         return visit(object.text, depth + 1);
       }
+      if (name === "PageBlockPhoto") {
+        if (object.photoId === undefined || object.photoId === null) throw new Error("invalid photo id");
+        return ["PageBlockPhoto", String(object.photoId), visit(object.caption, depth + 1), object.spoiler === true];
+      }
       if (name === "TextPlain" && object.text === "") return ["TextEmpty"];
       if (name === "TextConcat") {
         if (!Array.isArray(object.texts) || object.texts.length > RICH_LIMITS.textLength) {
@@ -368,7 +431,8 @@ function verifiedInspection(expected: RichInspection, actual: RichInspection): b
     !actual.truncated &&
     actual.unsupported.length === 0 &&
     expected.text === actual.text &&
-    JSON.stringify(expected.tables) === JSON.stringify(actual.tables)
+    JSON.stringify(expected.tables) === JSON.stringify(actual.tables) &&
+    expected.photoCount === actual.photoCount
   );
 }
 
@@ -387,14 +451,16 @@ export async function writeRichMessage(
   options: RichOptions = {},
   messageId?: number,
 ): Promise<RichReceipt> {
-  const compiled = compileRichMarkdown(markdown, options);
+  if (options.photo && operation !== "send") throw new Error("Inline Rich photo is supported only for send.");
+  const descriptor = options.photo ? photoDescriptor(options.photo) : undefined;
+  const compiled = compileRichMarkdown(markdown, { rtl: options.rtl, noautolink: options.noautolink });
   const normalizedOptions = Object.fromEntries(
     Object.entries(options)
-      .filter(([, value]) => value !== undefined)
+      .filter(([key, value]) => key !== "photo" && value !== undefined)
       .sort(),
   );
-  const optionsHash = hash({ operation, messageId, options: normalizedOptions });
-  const contentHash = hash(markdown);
+  const optionsHash = hash({ operation, messageId, options: normalizedOptions, ...(descriptor ? { photo: descriptor } : {}) });
+  const contentHash = descriptor ? hash({ markdown, photoIdentity: descriptor.identity }) : hash(markdown);
   const existing = await readRichReceipt(context.journalDirectory, requestId);
   if (existing) {
     if (
@@ -478,7 +544,13 @@ export async function writeRichMessage(
         }
       : {}),
   };
+  let stagingPhoto = Boolean(options.photo);
   try {
+    if (options.photo) {
+      await addRichPhoto(context, peer, compiled, options.photo, options);
+      common.richMessage = compiled.input;
+      stagingPhoto = false;
+    }
     const result = await context.once(() =>
       context.client.invoke(
         operation === "send"
@@ -507,7 +579,7 @@ export async function writeRichMessage(
   } catch (error) {
     const code = errorCode(error);
     const rpc = fields(error).code;
-    receipt.state = typeof rpc === "number" && rpc >= 400 && rpc < 500 ? "rejected" : "uncertain";
+    receipt.state = stagingPhoto || (typeof rpc === "number" && rpc >= 400 && rpc < 500) ? "rejected" : "uncertain";
     receipt.error = code;
     await checkpoint(context.journalDirectory, receipt);
     return receipt;

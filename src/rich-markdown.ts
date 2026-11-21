@@ -13,6 +13,7 @@ export interface RichInspection {
   textLength: number;
   blockCount: number;
   tableCount: number;
+  photoCount: number;
   tables: Array<{ title: string; headers: string[]; rows: string[][] }>;
   unsupported: string[];
   truncated: boolean;
@@ -379,6 +380,7 @@ export function inspectRichMessage(rich: unknown): RichInspection {
     textLength: 0,
     blockCount: 0,
     tableCount: 0,
+    photoCount: 0,
     tables: [],
     unsupported: [],
     truncated: false,
@@ -468,6 +470,12 @@ export function inspectRichMessage(rich: unknown): RichInspection {
       return text(v.text, depth + 1);
     }
     if (name === "PageBlockDivider") return "—";
+    if (name === "PageBlockPhoto") {
+      result.photoCount++;
+      const caption = record(v.caption);
+      const words = caption?.text ? text(caption.text, depth + 1) : "";
+      return words ? `[photo] ${words}` : "[photo]";
+    }
     if (name === "PageBlockBlockquote" || name === "PageBlockPullquote") {
       return [text(v.text, depth + 1), text(v.caption, depth + 1)].filter(Boolean).join("\n");
     }
