@@ -262,10 +262,20 @@ export async function getRichMessage(context: RichContext, chatId: string, messa
   const semanticUnsupported: string[] = [];
   const semanticStructure = richSemanticStructure(rich, semanticUnsupported);
   const semanticHash = semanticStructure === undefined ? undefined : hash(semanticStructure);
+  const photoBlocks = (Array.isArray(rich.blocks) ? rich.blocks : [])
+    .map(fields)
+    .filter((b) => b.className === "PageBlockPhoto" && b.photoId !== undefined)
+    .map((b) => String(b.photoId));
+  const attachedPhotos = new Set(
+    (Array.isArray(rich.photos) ? rich.photos : [])
+      .map(fields).filter((p) => p.id !== undefined).map((p) => String(p.id)),
+  );
+  const photoReferencesValid = photoBlocks.every((id) => attachedPhotos.has(id));
   return {
     chatId,
     messageId,
     partial: rich.part === true,
+    photoReferencesValid,
     inspection: inspectRichMessage(rich),
     semanticHash,
     semanticStructure,
@@ -438,7 +448,9 @@ function verifiedInspection(expected: RichInspection, actual: RichInspection): b
 
 function errorCode(error: unknown): string {
   const name = fields(error).errorMessage;
-  return typeof name === "string" && /^[A-Z][A-Z0-9_]{1,100}$/.test(name) ? name : "TRANSPORT_OR_DECODE_ERROR";
+  if (typeof name === "string" && /^[A-Z][A-Z0-9_]{1,100}$/.test(name)) return name;
+  if (error instanceof Error && error.message.startsWith("RICH_PHOTO_STAGE_FAILED")) return "RICH_PHOTO_STAGE_FAILED";
+  return "TRANSPORT_OR_DECODE_ERROR";
 }
 
 /** Single submission, with a durable reservation. Reusing requestId only returns its recorded state. */
@@ -590,6 +602,7 @@ export async function writeRichMessage(
       const readback = await getRichMessage(context, chatId, receipt.messageId);
       receipt.verified =
         !readback.partial &&
+        readback.photoReferencesValid &&
         verifiedInspection(compiled.inspection, readback.inspection) &&
         readback.semanticHash !== undefined &&
         readback.semanticHash === richSemanticHash(compiled.input);
