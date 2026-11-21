@@ -15,6 +15,7 @@ import { registerMessageTools } from "./messages.js";
 import { registerMusicTools } from "./music.js";
 import { registerQuickRepliesTools } from "./quick-replies.js";
 import { registerReactionTools } from "./reactions.js";
+import { registerRichMessageTools } from "./rich-messages.js";
 import { registerSendMediaTools } from "./send-media.js";
 import { registerStarsTools } from "./stars.js";
 import { registerStickerTools } from "./stickers.js";
@@ -24,6 +25,7 @@ import { registerTranscribeTools } from "./transcribe.js";
 export function registerTools(server: McpServer, telegram: TelegramService) {
   registerAuthTools(server, telegram);
   registerMessageTools(server, telegram);
+  registerRichMessageTools(server, telegram);
   registerChatTools(server, telegram);
   registerMediaTools(server, telegram);
   registerSendMediaTools(server, telegram);
