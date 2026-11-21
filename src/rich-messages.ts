@@ -5,7 +5,7 @@ import bigInt from "big-integer";
 import { LAYER } from "telegram/tl/AllTLObjects.js";
 import { Api } from "telegram/tl/index.js";
 import { compileRichMarkdown, inspectRichMessage, RICH_LIMITS, type RichInspection, type RichNode } from "./rich-markdown.js";
-import type { UploadedFile } from "./media-transfer.js";
+import { photoFileName, renamedInputFile, type UploadedFile } from "./media-transfer.js";
 
 type ObjectFields = Record<string, unknown>;
 type Constructor = new (args: ObjectFields) => Api.AnyRequest;
@@ -124,7 +124,11 @@ async function addRichPhoto(context: RichContext, peer: Api.TypeInputPeer, compi
     const uploaded = fields(await context.client.invoke(
       new Api.messages.UploadMedia({
         peer,
-        media: new Api.InputMediaUploadedPhoto({ file: photo.file.inputFile }),
+        // Signed URLs often end in an opaque token without .png/.jpg.
+        // Telegram rejects such staged images with PHOTO_EXT_INVALID.
+        media: new Api.InputMediaUploadedPhoto({
+          file: renamedInputFile(photo.file, photoFileName(photo.file.fileName, photo.file.mimeType)),
+        }),
       }),
     ));
     photoData = fields(uploaded.photo);

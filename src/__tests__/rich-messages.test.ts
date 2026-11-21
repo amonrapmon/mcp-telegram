@@ -82,6 +82,44 @@ function writes(calls: Fields[]) {
 }
 
 describe("durable native rich writes", () => {
+  it("adds the sniffed photo extension to opaque signed URL uploads before Telegram staging", async () => {
+    const opaque: UploadedFile = {
+      kind: "uploaded-file",
+      inputFile: new Api.InputFile({
+        id: bigInt(707), parts: 1, name: "opaque-token", md5Checksum: "0".repeat(32),
+      }),
+      fileName: "opaque-token", size: 1024, mimeType: "image/png",
+    };
+    let richWithPhoto: unknown;
+    await fixture(async (context, calls) => {
+      const result = await writeRichMessage(context, "send", "42", randomUUID(), markdown, {
+        photo: { identity: "url:signed-photo", file: opaque },
+      });
+      assert.equal(result.state, "sent");
+      assert.equal(result.verified, true);
+      const upload = calls.find((call) => call.className === "messages.UploadMedia");
+      assert.ok(upload);
+      assert.equal(f(f(upload.media).file).name, "opaque-token.png");
+      assert.equal(writes(calls).length, 1);
+    }, {
+      write: (call) => {
+        if (call.className === "messages.UploadMedia") {
+          assert.equal(f(f(call.media).file).name, "opaque-token.png");
+          return { className: "MessageMediaPhoto", photo: {
+            className: "Photo", id: bigInt(909), accessHash: bigInt(808),
+            fileReference: Buffer.from([1, 2]),
+          } };
+        }
+        if (call.className === "messages.SendMessage") richWithPhoto = call.richMessage;
+        return { updates: [{ className: "UpdateMessageID", randomId: call.randomId, id: 123 }] };
+      },
+      read: (call) => ({ messages: [{
+        id: call.id, peerId: returnedPeer,
+        richMessage: richWithPhoto,
+      }] }),
+    });
+  });
+
   it("reuses a photo already in Saved Messages with no upload or extra post", async () => {
     let composed: Fields | undefined;
     const photo = { className: "Photo", id: bigInt(987), accessHash: bigInt(654), fileReference: Buffer.from([9, 8]) };
