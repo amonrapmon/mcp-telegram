@@ -967,7 +967,7 @@ export class TelegramService {
    * The journal is namespaced by local session path and Telegram account ID.
    * No second Telegram login or Bot API token is required.
    */
-  private async richContext(): Promise<RichContext> {
+  private async richContext(journalOverride?: string): Promise<RichContext> {
     if (!this.client || !this.connected) throw new Error(NOT_CONNECTED_ERROR);
     const me = await this.client.getMe();
     if (!me || !("id" in me) || !me.id) throw new Error("Cannot determine active Telegram account for Rich operations.");
@@ -975,7 +975,7 @@ export class TelegramService {
     return {
       client: this.client as unknown as RichContext["client"],
       resolvePeer: (chatId) => this.resolvePeer(chatId),
-      journalDirectory: join(this.sessionDir, "rich-journal", sessionNamespace, me.id.toString()),
+      journalDirectory: journalOverride ?? join(this.sessionDir, "rich-journal", sessionNamespace, me.id.toString()),
       // IMPORTANT: no transparent retry for Rich writes. An ambiguous timeout
       // must remain uncertain instead of posting a duplicate.
       once: (fn) => fn(),
@@ -994,8 +994,8 @@ export class TelegramService {
     return readNativeRichMessage(await this.richContext(), chatId, messageId);
   }
 
-  async getRichSendStatus(requestId: string) {
-    const context = await this.richContext();
+  async getRichSendStatus(requestId: string, journalDirectory?: string) {
+    const context = await this.richContext(journalDirectory);
     return readRichReceipt(context.journalDirectory, requestId);
   }
 
@@ -1006,8 +1006,9 @@ export class TelegramService {
     markdown: string,
     options: RichOptions = {},
     messageId?: number,
+    journalDirectory?: string,
   ) {
-    return submitNativeRichMessage(await this.richContext(), operation, chatId, requestId, markdown, options, messageId);
+    return submitNativeRichMessage(await this.richContext(journalDirectory), operation, chatId, requestId, markdown, options, messageId);
   }
 
   async sendMessage(
