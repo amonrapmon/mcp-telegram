@@ -1,3 +1,13 @@
+import { createHash } from "node:crypto";
+import { compileRichMarkdown } from "./rich-markdown.js";
+import {
+  type RichContext,
+  type RichOptions,
+  getRichCapabilities as readNativeRichCapabilities,
+  getRichMessage as readNativeRichMessage,
+  readRichReceipt,
+  writeRichMessage as submitNativeRichMessage,
+} from "./rich-messages.js";
 import { existsSync } from "node:fs";
 import { chmod, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -950,6 +960,54 @@ export class TelegramService {
       username: user.username ?? undefined,
       firstName: user.firstName ?? undefined,
     };
+  }
+
+  /**
+   * Rich Messages use the same authenticated TelegramClient as ordinary messages.
+   * The journal is namespaced by local session path and Telegram account ID.
+   * No second Telegram login or Bot API token is required.
+   */
+  private async richContext(): Promise<RichContext> {
+    if (!this.client || !this.connected) throw new Error(NOT_CONNECTED_ERROR);
+    const me = await this.client.getMe();
+    if (!me || !("id" in me) || !me.id) throw new Error("Cannot determine active Telegram account for Rich operations.");
+    const sessionNamespace = createHash("sha256").update(this.sessionPath).digest("hex");
+    return {
+      client: this.client as unknown as RichContext["client"],
+      resolvePeer: (chatId) => this.resolvePeer(chatId),
+      journalDirectory: join(this.sessionDir, "rich-journal", sessionNamespace, me.id.toString()),
+      // IMPORTANT: no transparent retry for Rich writes. An ambiguous timeout
+      // must remain uncertain instead of posting a duplicate.
+      once: (fn) => fn(),
+    };
+  }
+
+  previewRichMessage(markdown: string, options: { rtl?: boolean; noautolink?: boolean } = {}) {
+    return compileRichMarkdown(markdown, options).inspection;
+  }
+
+  async getRichCapabilities() {
+    return readNativeRichCapabilities(await this.richContext());
+  }
+
+  async getRichMessage(chatId: string, messageId: number) {
+    return readNativeRichMessage(await this.richContext(), chatId, messageId);
+  }
+
+  async getRichSendStatus(requestId: string) {
+    const context = await this.richContext();
+    return readRichReceipt(context.journalDirectory, requestId);
+  }
+
+  async writeRichMessage(
+    operation: "send" | "edit" | "draft",
+    chatId: string,
+    requestId: string,
+    markdown: string,
+    options: RichOptions = {},
+    messageId?: number,
+  ) {
+    return submitNativeRichMessage(await this.richContext(), operation, chatId, requestId, markdown, options, messageId);
   }
 
   async sendMessage(
