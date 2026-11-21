@@ -33,6 +33,7 @@
     "lint": "biome check src/",
     "lint:fix": "biome check --fix src/",
     "format": "biome format --write src/",
+    "pretest": "node scripts/telegram-schema.mjs",
     "test": "tsx --test \"src/**/*.test.ts\"",
     "test:watch": "tsx --test --watch \"src/**/*.test.ts\"",
     "test:coverage": "c8 --all --src src --exclude \"src/**/*.test.ts\" --reporter=text tsx --test \"src/**/*.test.ts\"",
