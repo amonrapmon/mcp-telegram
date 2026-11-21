@@ -471,9 +471,13 @@ export function inspectRichMessage(rich: unknown): RichInspection {
     }
     if (name === "PageBlockDivider") return "—";
     if (name === "PageBlockPhoto") {
-      result.photoCount++;
       const caption = record(v.caption);
-      const words = caption?.text ? text(caption.text, depth + 1) : "";
+      if (v.photoId === undefined || v.photoId === null || !caption) {
+        note("PageBlockPhoto");
+        return "[PageBlockPhoto]";
+      }
+      result.photoCount++;
+      const words = caption.text ? text(caption.text, depth + 1) : "";
       return words ? `[photo] ${words}` : "[photo]";
     }
     if (name === "PageBlockBlockquote" || name === "PageBlockPullquote") {
