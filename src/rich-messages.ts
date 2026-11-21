@@ -26,6 +26,8 @@ export interface RichClient {
 export interface RichContext {
   client: RichClient;
   resolvePeer(chatId: string): Promise<unknown>;
+  /** Resolve one existing photo from this account's Saved Messages, without downloading bytes. */
+  getSavedPhoto?(messageId: number): Promise<unknown>;
   journalDirectory: string;
   /** Space calls without replaying a write after an uncertain network outcome. */
   once<T>(fn: () => Promise<T>): Promise<T>;
@@ -33,8 +35,10 @@ export interface RichContext {
 
 export interface RichPhoto {
   /** Bytes have been uploaded to the SAME Telegram account; this is NOT a published message. */
-  file: UploadedFile;
-  /** Stable source identifier from Cloud (uploadId or HTTPS URL), hashed in the receipt. */
+  file?: UploadedFile;
+  /** Existing Saved Messages photo, resolved fresh before the send. Exactly one of file/sourceMessageId. */
+  sourceMessageId?: number;
+  /** Stable source identifier from Cloud, hashed in the receipt. */
   identity: string;
   caption?: string;
   placement?: "before" | "after";
@@ -97,22 +101,36 @@ function richNode(name: string, args: ObjectFields): RichNode {
 
 function photoDescriptor(photo: RichPhoto) {
   if (!photo.identity || photo.identity.length > 2048) throw new Error("Rich photo identity is invalid.");
-  if (photo.file.kind !== "uploaded-file" || !photo.file.inputFile)
+  if (Boolean(photo.file) === (photo.sourceMessageId !== undefined))
+    throw new Error("Rich photo requires exactly one uploaded file or Saved Messages ID.");
+  if (photo.file && (photo.file.kind !== "uploaded-file" || !photo.file.inputFile))
     throw new Error("Rich photo requires a Telegram uploaded-file handle.");
+  if (photo.sourceMessageId !== undefined &&
+      (!Number.isSafeInteger(photo.sourceMessageId) || photo.sourceMessageId < 1))
+    throw new Error("Saved Messages photo ID must be a positive integer.");
   if ((photo.caption?.length ?? 0) > 1024) throw new Error("Rich photo caption is too long.");
   return { identity: photo.identity, caption: photo.caption ?? "", placement: photo.placement ?? "before" };
 }
 
 /** Register an uploaded photo without publishing anything, then insert its native Rich block. */
 async function addRichPhoto(context: RichContext, peer: Api.TypeInputPeer, compiled: ReturnType<typeof compileRichMarkdown>, photo: RichPhoto, flags: RichOptions) {
-  const uploaded = fields(await context.client.invoke(
-    new Api.messages.UploadMedia({
-      peer,
-      media: new Api.InputMediaUploadedPhoto({ file: photo.file.inputFile }),
-    }),
-  ));
-  const photoData = fields(uploaded.photo);
-  if (photoData.className !== "Photo" || !photoData.id || !photoData.accessHash || !photoData.fileReference)
+  let photoData: ObjectFields;
+  if (photo.sourceMessageId !== undefined) {
+    if (!context.getSavedPhoto)
+      throw new Error("RICH_PHOTO_STAGE_FAILED: Saved Messages lookup is unavailable.");
+    photoData = fields(await context.getSavedPhoto(photo.sourceMessageId));
+  } else {
+    if (!photo.file) throw new Error("RICH_PHOTO_STAGE_FAILED: Missing uploaded photo.");
+    const uploaded = fields(await context.client.invoke(
+      new Api.messages.UploadMedia({
+        peer,
+        media: new Api.InputMediaUploadedPhoto({ file: photo.file.inputFile }),
+      }),
+    ));
+    photoData = fields(uploaded.photo);
+  }
+  if (photoData.className !== "Photo" || photoData.id === undefined ||
+      photoData.accessHash === undefined || !photoData.fileReference)
     throw new Error("RICH_PHOTO_STAGE_FAILED: Telegram returned no reusable Photo reference.");
   const inputPhoto = richNode("InputPhoto", {
     id: photoData.id,

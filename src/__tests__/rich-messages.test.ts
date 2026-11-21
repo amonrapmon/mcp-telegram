@@ -36,6 +36,7 @@ async function fixture(
     premium?: boolean;
     write?: (request: Fields) => unknown | Promise<unknown>;
     read?: (request: Fields) => unknown;
+    savedPhoto?: (messageId: number) => unknown | Promise<unknown>;
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "telegram-rich-test-"));
@@ -43,6 +44,10 @@ async function fixture(
   const context: RichContext = {
     journalDirectory: directory,
     resolvePeer: async () => peer,
+    getSavedPhoto: async (id) => {
+      if (!options.savedPhoto) throw new Error("No mock Saved Messages photo.");
+      return options.savedPhoto(id);
+    },
     once: async (fn) => fn(),
     client: {
       getInputEntity: async () => peer,
@@ -77,6 +82,46 @@ function writes(calls: Fields[]) {
 }
 
 describe("durable native rich writes", () => {
+  it("reuses a photo already in Saved Messages with no upload or extra post", async () => {
+    let composed: Fields | undefined;
+    const photo = { className: "Photo", id: bigInt(987), accessHash: bigInt(654), fileReference: Buffer.from([9, 8]) };
+    await fixture(async (context, calls) => {
+      const requestId = randomUUID();
+      const opts = { photo: { sourceMessageId: 400468, identity: "telegram:me:400468", caption: "Царь" } };
+      const receipt = await writeRichMessage(context, "send", "42", requestId, markdown, opts);
+      assert.equal(receipt.state, "sent");
+      assert.equal(receipt.verified, true);
+      assert.equal(calls.some((item) => item.className === "messages.UploadMedia"), false);
+      assert.equal(writes(calls).length, 1);
+      const sent = writes(calls)[0];
+      assert.equal(f((f(sent.richMessage).blocks as Fields[])[0]).className, "PageBlockPhoto");
+      assert.equal(String(f((f(sent.richMessage).photos as Fields[])[0]).id), "987");
+      assert.deepEqual(await writeRichMessage(context, "send", "42", requestId, markdown, opts), receipt);
+      assert.equal(writes(calls).length, 1);
+    }, {
+      savedPhoto: (messageId) => {
+        assert.equal(messageId, 400468);
+        return photo;
+      },
+      write: (request) => {
+        if (request.className === "messages.SendMessage") composed = f(request.richMessage);
+        return { updates: [{ className: "UpdateMessageID", randomId: request.randomId, id: 123 }] };
+      },
+      read: (request) => ({ messages: [{ id: request.id, peerId: returnedPeer, richMessage: composed }] }),
+    });
+  });
+
+  it("refuses non-photo Saved Messages sources before sending", async () => {
+    await fixture(async (context, calls) => {
+      const id = randomUUID();
+      const receipt = await writeRichMessage(context, "send", "42", id, markdown, {
+        photo: { sourceMessageId: 400607, identity: "telegram:me:400607" },
+      });
+      assert.equal(receipt.state, "rejected");
+      assert.equal(writes(calls).length, 0);
+    }, { savedPhoto: () => { throw new Error("Source is a document, not a photo."); } });
+  });
+
   it("stages an image without a separate post, then sends one native Rich message with photo and table", async () => {
     let composed: Fields | undefined;
     const image: UploadedFile = {

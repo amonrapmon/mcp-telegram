@@ -975,6 +975,24 @@ export class TelegramService {
     return {
       client: this.client as unknown as RichContext["client"],
       resolvePeer: (chatId) => this.resolvePeer(chatId),
+      getSavedPhoto: async (messageId) => {
+        if (!Number.isSafeInteger(messageId) || messageId < 1)
+          throw new Error("Invalid Saved Messages photo messageId.");
+        const messages = await this.client!.getMessages(await this.resolvePeer("me"), { ids: [messageId] });
+        const found = messages.find((item) => item.id === messageId);
+        if (!(found instanceof Api.Message))
+          throw new Error("Saved Messages source message was not found.");
+        const fromMedia = found.media instanceof Api.MessageMediaPhoto &&
+          found.media.photo instanceof Api.Photo ? found.media.photo : undefined;
+        const richPhotos = (found as unknown as { richMessage?: { photos?: unknown[] } }).richMessage?.photos;
+        const fromRich = Array.isArray(richPhotos)
+          ? richPhotos.find((value): value is Api.Photo => value instanceof Api.Photo)
+          : undefined;
+        const photo = fromMedia ?? fromRich;
+        if (!photo)
+          throw new Error("Saved Messages source must contain a Telegram photo, not a document or text.");
+        return photo;
+      },
       journalDirectory: journalOverride ?? join(this.sessionDir, "rich-journal", sessionNamespace, me.id.toString()),
       // IMPORTANT: no transparent retry for Rich writes. An ambiguous timeout
       // must remain uncertain instead of posting a duplicate.
